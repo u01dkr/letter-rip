@@ -26,7 +26,7 @@ type Props = {
 type Flash = { id: number; text: string; good: boolean };
 
 export default function SoloGame({ root, seconds, dict, title, onFinish, onQuit }: Props) {
-  const [letters, setLetters] = useState(() => scramble(root));
+  const [letters, setLetters] = useState(() => root.split("")); // show the real word first
   const [picked, setPicked] = useState<number[]>([]); // tile indices, in order
   const [found, setFound] = useState<string[]>([]); // newest first
   const [score, setScore] = useState(0);

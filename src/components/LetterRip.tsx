@@ -229,13 +229,17 @@ export default function LetterRip() {
         </button>
         {showRules && (
           <div className="px-4 pb-4 text-sm text-paper/85 space-y-2">
-            <p>Make words of three letters or more from the big word. Each letter can be used once.</p>
+            <p>
+              You get a big word. Make new words of three letters or more from its letters. Each letter can be
+              used once, and the big word itself doesn&apos;t count.
+            </p>
             <p>
               Longer words score more:{" "}
               {[3, 4, 5, 6, 7, 8, 9].map((n) => `${n}→${wordPoints("x".repeat(n), "x".repeat(10))}`).join(", ")}.
             </p>
             <p>
-              Use <b>every</b> letter for a <span className="text-sun font-bold">Full Rip</span>: +10 bonus.
+              Find a <b>different</b> word that uses every letter for a{" "}
+              <span className="text-sun font-bold">Full Rip</span>: +10 bonus.
             </p>
             <p className="text-muted">On a keyboard: type letters, Enter to submit, Space to shuffle.</p>
           </div>

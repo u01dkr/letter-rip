@@ -64,7 +64,7 @@ export function canMake(word: string, root: string): boolean {
 export function findableWords(root: string, dict: Dictionary): string[] {
   const out: string[] = [];
   for (const w of dict.common) {
-    if (w.length <= root.length && canMake(w, root)) out.push(w);
+    if (w !== root && w.length <= root.length && canMake(w, root)) out.push(w);
   }
   return out.sort((a, b) => b.length - a.length || a.localeCompare(b));
 }
@@ -73,13 +73,14 @@ export function findableWords(root: string, dict: Dictionary): string[] {
 export function wordPoints(word: string, root: string): number {
   const table: Record<number, number> = { 3: 1, 4: 2, 5: 3, 6: 5, 7: 8, 8: 12, 9: 16 };
   let pts = table[word.length] ?? 0;
-  if (word.length === root.length) pts += 10; // used every letter: a "full rip"
+  // Another word using every letter (an anagram of the root) is a "full rip"
+  if (word.length === root.length) pts += 10;
   return pts;
 }
 
 export type GuessResult =
   | { ok: true; word: string; points: number; fullRip: boolean }
-  | { ok: false; reason: "short" | "letters" | "used" | "unknown" };
+  | { ok: false; reason: "short" | "root" | "letters" | "used" | "unknown" };
 
 export function checkGuess(
   raw: string,
@@ -89,6 +90,7 @@ export function checkGuess(
 ): GuessResult {
   const word = raw.trim().toLowerCase();
   if (word.length < 3) return { ok: false, reason: "short" };
+  if (word === root) return { ok: false, reason: "root" };
   if (!canMake(word, root)) return { ok: false, reason: "letters" };
   if (used.has(word)) return { ok: false, reason: "used" };
   if (!dict.accepted.has(word)) return { ok: false, reason: "unknown" };
@@ -102,6 +104,7 @@ export function checkGuess(
 
 export const REASON_TEXT: Record<Exclude<GuessResult, { ok: true }>["reason"], string> = {
   short: "Three letters or more",
+  root: "That's the word you were given!",
   letters: "Those letters aren't all there",
   used: "Already got that one",
   unknown: "Not in our dictionary",
