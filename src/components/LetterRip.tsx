@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import SoloGame, { type SoloResult } from "./SoloGame";
 import Results from "./Results";
+import ChallengeCard from "./ChallengeCard";
 import {
   dailyNumber,
   dailyRoot,
@@ -207,16 +208,7 @@ export default function LetterRip() {
           </button>
         </div>
 
-        {/* Challenge (next stage) */}
-        <div className="rounded-3xl border-2 border-dashed border-ink-3 p-4 flex items-center justify-between">
-          <div>
-            <div className="font-display text-xl font-extrabold text-paper/90">Challenge</div>
-            <div className="text-sm text-muted">2+ players · three strikes and you&apos;re out</div>
-          </div>
-          <span className="text-xs font-bold uppercase tracking-wider bg-ink-3 text-muted px-2.5 py-1 rounded-full">
-            Soon
-          </span>
-        </div>
+        <ChallengeCard />
       </section>
 
       <section className="rounded-2xl bg-ink-2/70 border border-ink-3">
