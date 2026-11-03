@@ -5,6 +5,9 @@ export const ROOMS = "letterRip"; // Firestore collection (separate from Acro Pa
 export const MAX_PLAYERS = 8;
 export const MAX_STRIKES = 3;
 export const PAUSE_MS = 3500; // breather before each new word
+// A turn's clock only starts once that player's phone shows it's their turn.
+// If their phone never confirms (lost signal), they still get the strike after this extra time.
+export const UNSEEN_GRACE_MS = 8000;
 
 /** Seconds per turn: the clock shrinks as the easy words get used up. */
 export function turnSeconds(level: Level, wordsUsed: number): number {
@@ -46,6 +49,8 @@ export type Room = {
   turnNo: number; // goes up every turn; stops two phones acting on the same turn
   pauseUntil: number; // server time the current turn really starts
   turnEndsAt: number; // server time the current turn ends
+  turnSeenAt: number | null; // when the player's phone confirmed it's their turn
+  rev: number; // goes up on every change, so phones can tell old data from new
   last: RoomEvent;
   outOrder: string[]; // who went out, in order
   winner: string | null;

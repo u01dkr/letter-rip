@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, getDocFromServer, onSnapshot } from "firebase/firestore";
 import { ensureSignedIn, firebaseReady, getDb } from "@/lib/firebase";
 import { serverNow, syncClock } from "@/lib/clock";
 import { checkGuess, loadDictionary, REASON_TEXT, type Dictionary } from "@/lib/words";
@@ -16,12 +16,13 @@ import {
   type RoomEvent,
 } from "@/lib/challenge";
 import {
-  TIMEOUT_GRACE_MS,
+  ackTurn,
   joinRoom,
   leaveLobby,
   playAgain,
   setLevel,
   startGame,
+  strikeAt,
   submitWord,
   timeoutTurn,
 } from "@/lib/challengeActions";
@@ -41,7 +42,32 @@ export default function ChallengeRoom({ code }: { code: string }) {
   useEffect(() => {
     if (!firebaseReady) return;
     let unsub = () => {};
+    let poll: ReturnType<typeof setInterval> | undefined;
     let cancelled = false;
+    let latestRev = -1;
+    let playing = false;
+    const ref = doc(getDb(), ROOMS, code);
+
+    // Only ever move forwards: ignore data older than what we already have
+    const apply = (data: Room) => {
+      const rev = data.rev ?? 0;
+      if (rev < latestRev) return;
+      latestRev = rev;
+      playing = data.phase === "playing";
+      setRoom(data);
+      setStatus("ready");
+    };
+
+    // Safety net: iPhones can quietly stop getting live updates (screen dims, app switch).
+    // So during a game, and whenever the page comes back into view, ask the server directly.
+    const check = () => {
+      if (cancelled) return;
+      getDocFromServer(ref)
+        .then((snap) => snap.exists() && apply(snap.data() as Room))
+        .catch(() => {});
+    };
+    const onVisible = () => document.visibilityState === "visible" && check();
+
     ensureSignedIn()
       .then(async (user) => {
         if (cancelled) return;
@@ -49,20 +75,27 @@ export default function ChallengeRoom({ code }: { code: string }) {
         await syncClock(code, user.uid);
         if (cancelled) return;
         unsub = onSnapshot(
-          doc(getDb(), ROOMS, code),
+          ref,
           (snap) => {
             if (!snap.exists()) return setStatus("missing");
-            setRoom(snap.data() as Room);
-            setStatus("ready");
+            apply(snap.data() as Room);
           },
           () => setStatus("error")
         );
+        poll = setInterval(() => playing && document.visibilityState === "visible" && check(), 3000);
+        document.addEventListener("visibilitychange", onVisible);
+        window.addEventListener("online", check);
+        window.addEventListener("focus", check);
       })
       .catch(() => setStatus("error"));
     loadDictionary().then(setDict, () => setError("Couldn't load the word list. Refresh to try again."));
     return () => {
       cancelled = true;
       unsub();
+      clearInterval(poll);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", check);
+      window.removeEventListener("focus", check);
     };
   }, [code]);
 
@@ -362,17 +395,29 @@ function Game({ code, room, uid, dict }: { code: string; room: Room; uid: string
   const secs = Math.ceil(leftMs / 1000);
   const hurry = !paused && secs <= 5;
 
+  // As soon as this phone is showing your turn, tell the game. Your full time starts then,
+  // so a slow connection can never cost you a strike you couldn't see coming.
+  const acked = useRef(0);
+  useEffect(() => {
+    if (!myTurn || room.turnSeenAt || acked.current === room.turnNo) return;
+    if (document.visibilityState !== "visible") return;
+    acked.current = room.turnNo;
+    ackTurn(code, uid, room.turnNo).catch(() => {
+      acked.current = 0; // try again on the next tick
+    });
+  }, [myTurn, room.turnSeenAt, room.turnNo, code, uid, now]);
+
   // When a clock runs out, any phone can hand out the strike (the first one counts).
   // The player whose turn it is goes first; the others wait a moment longer as backup.
   useEffect(() => {
-    const wait = TIMEOUT_GRACE_MS + (myTurn ? 0 : 700);
-    if (now > room.turnEndsAt + wait && asked.current !== room.turnNo) {
+    const at = strikeAt(room) + (myTurn ? 0 : 700);
+    if (now > at && asked.current !== room.turnNo) {
       asked.current = room.turnNo;
       timeoutTurn(code, room.turnNo).catch(() => {
         asked.current = 0; // try again on the next tick
       });
     }
-  }, [now, room.turnEndsAt, room.turnNo, myTurn, code]);
+  }, [now, room, myTurn, code]);
 
   // Buzz the phone when it becomes your turn
   useEffect(() => {
@@ -448,6 +493,9 @@ function Game({ code, room, uid, dict }: { code: string; room: Room; uid: string
             >
               <span className="pop inline-block">{myTurn ? "YOUR TURN!" : `${turnName}'s turn`}</span>
             </div>
+            {!myTurn && !room.turnSeenAt && leftMs <= 0 && (
+              <div className="text-muted text-sm mt-1">Waiting for {turnName}&apos;s phone…</div>
+            )}
             <div className="flex items-center gap-3 mt-3">
               <div className="h-3 flex-1 rounded-full bg-ink-3 overflow-hidden">
                 <div

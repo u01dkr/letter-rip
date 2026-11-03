@@ -1,6 +1,6 @@
 // Everything that changes a challenge game in the database lives here.
 // Turn changes use transactions, so two phones can never act on the same turn.
-import { doc, getDoc, setDoc, updateDoc, runTransaction, deleteField } from "firebase/firestore";
+import { doc, getDoc, setDoc, runTransaction, deleteField } from "firebase/firestore";
 import { getDb } from "./firebase";
 import { serverNow } from "./clock";
 import { randomRoot, type Level } from "./words";
@@ -9,6 +9,7 @@ import {
   MAX_PLAYERS,
   MAX_STRIKES,
   PAUSE_MS,
+  UNSEEN_GRACE_MS,
   makeCode,
   nextAlive,
   alivePlayers,
@@ -53,6 +54,8 @@ export async function createRoom(uid: string, name: string): Promise<string> {
       used: [],
       outOrder: [],
       winner: null,
+      turnSeenAt: null,
+      rev: 1,
     };
     await setDoc(roomRef(code), room);
     return code;
@@ -66,13 +69,13 @@ export async function joinRoom(code: string, uid: string, name: string) {
     if (!snap.exists()) throw new Error(`No game found with code ${code}.`);
     const room = snap.data() as Room;
     if (room.players[uid]) {
-      tx.update(roomRef(code), { [`players.${uid}.name`]: name });
+      tx.update(roomRef(code), { [`players.${uid}.name`]: name, rev: (room.rev ?? 0) + 1 });
       return;
     }
     if (room.phase !== "lobby") throw new Error("That game has already started. Wait for the next one.");
     if (Object.keys(room.players).length >= MAX_PLAYERS)
       throw new Error(`That game is full (${MAX_PLAYERS} players max).`);
-    tx.update(roomRef(code), { [`players.${uid}`]: newPlayer(name) });
+    tx.update(roomRef(code), { [`players.${uid}`]: newPlayer(name), rev: (room.rev ?? 0) + 1 });
   });
 }
 
@@ -85,13 +88,20 @@ export async function leaveLobby(code: string, uid: string) {
     const others = Object.entries(room.players)
       .filter(([id]) => id !== uid)
       .sort((a, b) => a[1].joinedAt - b[1].joinedAt);
-    const update: Record<string, unknown> = { [`players.${uid}`]: deleteField() };
+    const update: Record<string, unknown> = { [`players.${uid}`]: deleteField(), rev: (room.rev ?? 0) + 1 };
     if (room.hostId === uid && others.length) update.hostId = others[0][0];
     tx.update(roomRef(code), update);
   });
 }
 
-export const setLevel = (code: string, level: Level) => updateDoc(roomRef(code), { level });
+export async function setLevel(code: string, level: Level) {
+  await runTransaction(getDb(), async (tx) => {
+    const snap = await tx.get(roomRef(code));
+    const room = snap.data() as Room;
+    if (!room || room.phase !== "lobby") return;
+    tx.update(roomRef(code), { level, rev: (room.rev ?? 0) + 1 });
+  });
+}
 
 export async function startGame(code: string, uid: string) {
   await runTransaction(getDb(), async (tx) => {
@@ -116,15 +126,39 @@ export async function startGame(code: string, uid: string) {
       turnNo: 1,
       pauseUntil,
       turnEndsAt: pauseUntil + turnSeconds(room.level, 0) * 1000,
+      turnSeenAt: null,
       last: { id: 1, kind: "start" },
       outOrder: [],
       winner: null,
+      rev: (room.rev ?? 0) + 1,
     });
   });
 }
 
 const SUBMIT_GRACE_MS = 1500; // allows for a slow connection on the last second
 export const TIMEOUT_GRACE_MS = 2000; // a strike is only given a little after the clock hits zero
+
+/** When a strike can be given for the current turn. A phone that never showed the turn gets extra time. */
+export function strikeAt(room: Pick<Room, "turnEndsAt" | "turnSeenAt">): number {
+  return room.turnEndsAt + TIMEOUT_GRACE_MS + (room.turnSeenAt ? 0 : UNSEEN_GRACE_MS);
+}
+
+/** The player's phone confirms it's showing their turn. Their full time starts now. */
+export async function ackTurn(code: string, uid: string, turnNo: number) {
+  await runTransaction(getDb(), async (tx) => {
+    const snap = await tx.get(roomRef(code));
+    const room = snap.data() as Room;
+    if (!room || room.phase !== "playing" || room.turn !== uid || room.turnNo !== turnNo || room.turnSeenAt) return;
+    const now = serverNow();
+    const start = Math.max(now, room.pauseUntil);
+    tx.update(roomRef(code), {
+      turnSeenAt: now,
+      pauseUntil: start,
+      turnEndsAt: start + turnSeconds(room.level, room.used.length) * 1000,
+      rev: (room.rev ?? 0) + 1,
+    });
+  });
+}
 
 /** Plays a word. The word has already been checked against the dictionary on the player's phone. */
 export async function submitWord(code: string, uid: string, turnNo: number, word: string) {
@@ -151,6 +185,8 @@ export async function submitWord(code: string, uid: string, turnNo: number, word
       turnNo: room.turnNo + 1,
       pauseUntil: now,
       turnEndsAt: now + turnSeconds(room.level, used.length) * 1000,
+      turnSeenAt: null,
+      rev: (room.rev ?? 0) + 1,
       last: fullRip
         ? { id: room.turnNo + 1, kind: "fullrip", uid, word, savedStrike }
         : { id: room.turnNo + 1, kind: "word", uid, word },
@@ -165,7 +201,7 @@ export async function timeoutTurn(code: string, turnNo: number) {
     const snap = await tx.get(roomRef(code));
     const room = snap.data() as Room;
     if (!room || room.phase !== "playing" || room.turnNo !== turnNo) return;
-    if (serverNow() < room.turnEndsAt + TIMEOUT_GRACE_MS - 500) return; // too early
+    if (serverNow() < strikeAt(room) - 500) return; // too early
 
     const uid = room.turn;
     const strikes = room.players[uid].strikes + 1;
@@ -181,6 +217,7 @@ export async function timeoutTurn(code: string, turnNo: number) {
         outOrder,
         winner: alive[0] ?? uid,
         turnNo: room.turnNo + 1,
+        rev: (room.rev ?? 0) + 1,
         last: { id: room.turnNo + 1, kind: out ? "out" : "strike", uid, strikes },
       });
       return;
@@ -200,6 +237,8 @@ export async function timeoutTurn(code: string, turnNo: number) {
       turnNo: room.turnNo + 1,
       pauseUntil,
       turnEndsAt: pauseUntil + turnSeconds(room.level, 0) * 1000,
+      turnSeenAt: null,
+      rev: (room.rev ?? 0) + 1,
       last: out
         ? { id: room.turnNo + 1, kind: "out", uid }
         : { id: room.turnNo + 1, kind: "strike", uid, strikes },
@@ -213,6 +252,6 @@ export async function playAgain(code: string) {
     const snap = await tx.get(roomRef(code));
     const room = snap.data() as Room;
     if (!room || room.phase !== "over") return;
-    tx.update(roomRef(code), { phase: "lobby", winner: null, used: [], outOrder: [] });
+    tx.update(roomRef(code), { phase: "lobby", winner: null, used: [], outOrder: [], rev: (room.rev ?? 0) + 1 });
   });
 }

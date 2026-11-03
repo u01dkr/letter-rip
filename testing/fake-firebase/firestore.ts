@@ -35,7 +35,9 @@ function write(r: Ref, data: any) {
   notify(r.path);
   chan?.postMessage(r.path);
 }
+// Tests can set window.__dropLive = true to mimic a phone whose live updates have stalled
 function notify(path: string) {
+  if ((globalThis as any).__dropLive) return;
   listeners.get(path)?.forEach((f) => setTimeout(f, 0));
 }
 if (chan) chan.onmessage = (e) => notify(e.data);
