@@ -5,6 +5,8 @@ import SoloGame, { type SoloResult } from "./SoloGame";
 import Results from "./Results";
 import LadderSolo, { type LadderSoloResult } from "./LadderSolo";
 import LadderResults from "./LadderResults";
+import LadderPuzzle, { PuzzleResults, type PuzzleOutcome } from "./LadderPuzzle";
+import { dailyPuzzle, makePuzzle, type Puzzle } from "@/lib/puzzle";
 import ChallengeCard from "./ChallengeCard";
 import {
   dailyNumber,
@@ -17,7 +19,18 @@ import {
   type Dictionary,
 } from "@/lib/words";
 import { dailyLadderStart, ladderSeconds, randomLadderStart } from "@/lib/ladder";
-import { dailyStreak, getBest, getDaily, saveBest, saveDaily, type DailyResult, type Game } from "@/lib/stats";
+import {
+  dailyStreak,
+  getBest,
+  getDaily,
+  getPuzzleDaily,
+  saveBest,
+  saveDaily,
+  savePuzzleDaily,
+  type DailyResult,
+  type Game,
+  type PuzzleResult,
+} from "@/lib/stats";
 
 type Mode = "daily" | "quick" | "kids";
 
@@ -37,7 +50,11 @@ type Screen =
   | { kind: "playing"; mode: Mode; root: string; game: number }
   | { kind: "results"; mode: Mode; root: string; score: number; found: string[]; newBest: boolean }
   | { kind: "ladder"; mode: Mode; start: string; game: number }
-  | { kind: "ladderResults"; mode: Mode; chain: string[]; ending: LadderSoloResult["ending"]; newBest: boolean };
+  | { kind: "ladderResults"; mode: Mode; chain: string[]; ending: LadderSoloResult["ending"]; newBest: boolean }
+  | { kind: "puzzle"; mode: Mode; puzzle: Puzzle; game: number }
+  | { kind: "puzzleResults"; mode: Mode; puzzle: Puzzle; outcome: PuzzleOutcome };
+
+const PUZZLE_TITLES: Record<Mode, string> = { daily: "Daily Puzzle", quick: "Puzzle", kids: "Kids' Puzzle" };
 
 const GAME_KEY = "letter-rip-game";
 
@@ -51,6 +68,7 @@ export default function LetterRip() {
   const [streak, setStreak] = useState(0);
   const [best, setBest] = useState({ quick: 0, kids: 0 });
   const [showRules, setShowRules] = useState(false);
+  const [puzzleToday, setPuzzleToday] = useState<PuzzleResult | null>(null);
 
   const fetchDict = useCallback(() => {
     setDictError(false);
@@ -63,6 +81,7 @@ export default function LetterRip() {
     setTodayResult(getDaily(g, key));
     setStreak(dailyStreak(g, key));
     setBest({ quick: getBest(g, "quick"), kids: getBest(g, "kids") });
+    setPuzzleToday(getPuzzleDaily(key));
   }, []);
 
   useEffect(() => {
@@ -121,6 +140,35 @@ export default function LetterRip() {
     },
     [dict, refreshStats]
   );
+
+  function startPuzzle(mode: Mode) {
+    if (!dict) return;
+    const puzzle =
+      mode === "daily" ? dailyPuzzle(dict, todayKey()) : makePuzzle(dict, mode === "kids" ? "easy" : "normal");
+    setScreen({ kind: "puzzle", mode, puzzle, game: Date.now() });
+  }
+
+  const finishPuzzle = useCallback(
+    (mode: Mode, puzzle: Puzzle) => (outcome: PuzzleOutcome) => {
+      if (mode === "daily") {
+        savePuzzleDaily(todayKey(), { ...outcome, par: puzzle.par, target: puzzle.target });
+        refreshStats("ladder");
+      }
+      setScreen({ kind: "puzzleResults", mode, puzzle, outcome });
+    },
+    [refreshStats]
+  );
+
+  function showPuzzleToday() {
+    if (!puzzleToday) return;
+    const { route, hints, solved, par, target } = puzzleToday;
+    setScreen({
+      kind: "puzzleResults",
+      mode: "daily",
+      puzzle: { start: route[0], target, par },
+      outcome: { route, hints, solved },
+    });
+  }
 
   const finishLadder = useCallback(
     (mode: Mode) => (r: LadderSoloResult) => {
@@ -186,6 +234,42 @@ export default function LetterRip() {
         title={LADDER_MODES[screen.mode].title}
         onFinish={finishLadder(screen.mode)}
         onQuit={home}
+      />
+    );
+  }
+
+  if (screen.kind === "puzzle" && dict) {
+    return (
+      <LadderPuzzle
+        key={screen.game}
+        puzzle={screen.puzzle}
+        dict={dict}
+        title={PUZZLE_TITLES[screen.mode]}
+        onFinish={finishPuzzle(screen.mode, screen.puzzle)}
+        onQuit={home}
+      />
+    );
+  }
+
+  if (screen.kind === "puzzleResults" && dict) {
+    const { mode, puzzle, outcome } = screen;
+    const strokes = outcome.route.length - 1 + outcome.hints;
+    const shareText =
+      mode === "daily"
+        ? `Word Ladder Puzzle #${dailyNumber(today)} ⛳\n${puzzle.start.toUpperCase()} → ${puzzle.target.toUpperCase()}: ` +
+          (outcome.solved ? `${strokes} (par ${puzzle.par})` : "gave up!") +
+          origin
+        : undefined;
+    return (
+      <PuzzleResults
+        puzzle={puzzle}
+        outcome={outcome}
+        dict={dict}
+        heading={mode === "daily" ? `Daily Puzzle #${dailyNumber(today)}` : PUZZLE_TITLES[mode]}
+        shareText={shareText}
+        onAgain={() => startPuzzle(mode === "daily" ? "quick" : mode)}
+        againLabel={mode === "daily" ? "Try a random puzzle" : "Another puzzle"}
+        onHome={home}
       />
     );
   }
@@ -334,6 +418,40 @@ export default function LetterRip() {
           </button>
         </div>
 
+        {isLadder && (
+          <div className="rounded-3xl bg-[#5cc8ff] text-ink p-5 shadow-[0_6px_0_#2a8ab8]">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="font-display text-2xl font-extrabold">Ladder Puzzle ⛳</div>
+                <div className="text-sm text-ink/75">Get from one word to another in as few moves as you can</div>
+              </div>
+            </div>
+            {puzzleToday ? (
+              <button onClick={showPuzzleToday} disabled={!ready} className="btn mt-4 w-full h-12 bg-ink text-[#5cc8ff]">
+                {puzzleToday.solved
+                  ? `Today's: ${puzzleToday.route.length - 1 + puzzleToday.hints} (par ${puzzleToday.par}) · See results`
+                  : "Today's: gave up · See results"}
+              </button>
+            ) : (
+              <button
+                onClick={() => startPuzzle("daily")}
+                disabled={!ready}
+                className="btn mt-4 w-full h-12 bg-ink text-[#5cc8ff] text-lg"
+              >
+                {ready ? "Today's puzzle" : "Loading…"}
+              </button>
+            )}
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <button onClick={() => startPuzzle("quick")} disabled={!ready} className="btn h-11 bg-ink/15 text-ink">
+                Random
+              </button>
+              <button onClick={() => startPuzzle("kids")} disabled={!ready} className="btn h-11 bg-ink/15 text-ink">
+                Kids&apos;
+              </button>
+            </div>
+          </div>
+        )}
+
         <ChallengeCard />
       </section>
 
@@ -356,6 +474,10 @@ export default function LetterRip() {
               <p>
                 Your score is how many rungs you climb. Watch out for <b>dead ends</b>: words with nowhere left to
                 go. Keep your options open!
+              </p>
+              <p>
+                <b>Ladder Puzzle:</b> get from the start word to the target word, one letter at a time, in as few
+                moves as you can. Par is the shortest route. No clock, but each hint costs a stroke.
               </p>
               <p className="text-muted">On a keyboard: just type the new word and press Enter.</p>
             </div>

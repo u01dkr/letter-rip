@@ -2,6 +2,8 @@
 
 export type Game = "rip" | "ladder";
 export type DailyResult = { score: number; words: string[]; possible: number };
+/** Word Ladder puzzle: the route taken, hints used, par, and whether it was solved. */
+export type PuzzleResult = { route: string[]; hints: number; par: number; target: string; solved: boolean };
 
 type Stats = {
   daily: Record<string, DailyResult>; // Letter Rip, keyed by YYYY-MM-DD
@@ -10,6 +12,7 @@ type Stats = {
   ladderDaily: Record<string, DailyResult>; // Word Ladder
   ladderBestQuick: number;
   ladderBestKids: number;
+  puzzleDaily: Record<string, PuzzleResult>;
 };
 
 const KEY = "letter-rip-stats-v1";
@@ -20,6 +23,7 @@ const EMPTY: Stats = {
   ladderDaily: {},
   ladderBestQuick: 0,
   ladderBestKids: 0,
+  puzzleDaily: {},
 };
 
 export function loadStats(): Stats {
@@ -85,4 +89,14 @@ export function dailyStreak(game: Game, todayKey: string): number {
     d.setUTCDate(d.getUTCDate() - 1);
   }
   return streak;
+}
+
+export const getPuzzleDaily = (key: string): PuzzleResult | null => loadStats().puzzleDaily[key] ?? null;
+
+export function savePuzzleDaily(key: string, result: PuzzleResult) {
+  const s = loadStats();
+  if (!s.puzzleDaily[key]) {
+    s.puzzleDaily[key] = result; // only the first attempt counts
+    save(s);
+  }
 }
