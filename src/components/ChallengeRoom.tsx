@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { doc, getDocFromServer, onSnapshot } from "firebase/firestore";
-import { ensureSignedIn, firebaseReady, getDb } from "@/lib/firebase";
+import { ensureSignedIn, firebaseReady, getDb, restartConnection } from "@/lib/firebase";
+import { readDirect } from "@/lib/direct";
 import { serverNow, syncClock } from "@/lib/clock";
 import { checkGuess, loadDictionary, REASON_TEXT, type Dictionary } from "@/lib/words";
 import { MAX_STRIKES, ROOMS, playerColour, playersByJoin, standings, type Room, type RoomEvent } from "@/lib/challenge";
@@ -44,25 +45,53 @@ export default function ChallengeRoom({ code }: { code: string }) {
     let playing = false;
     const ref = doc(getDb(), ROOMS, code);
 
-    // Only ever move forwards: ignore data older than what we already have
+    // Only ever move forwards: ignore data older than what we already have.
+    // Returns true if the data was newer than what this phone was showing.
     const apply = (data: Room) => {
       const rev = data.rev ?? 0;
-      if (rev < latestRev) return;
+      if (rev < latestRev) return false;
+      const newer = rev > latestRev;
       latestRev = rev;
       playing = data.phase === "playing";
       setRoom(data);
       setStatus("ready");
+      return newer;
     };
 
     // Safety net: iPhones can quietly stop getting live updates (screen dims, app switch).
-    // So during a game, and whenever the page comes back into view, ask the server directly.
-    const check = () => {
-      if (cancelled) return;
-      getDocFromServer(ref)
-        .then((snap) => snap.exists() && apply(snap.data() as Room))
-        .catch(() => {});
+    // So during a game, and whenever the page comes back into view, ask the server directly,
+    // over a plain web request that doesn't rely on the live connection. If this phone has
+    // fallen behind, catch up straight away and restart the stuck live connection.
+    let checking = false;
+    const check = async () => {
+      if (cancelled || checking) return;
+      checking = true;
+      try {
+        const before = latestRev;
+        let data = await readDirect(`${ROOMS}/${code}`);
+        if (data === undefined) {
+          // Plain request not possible (e.g. offline): fall back to Firebase's own fetch
+          // (with a time limit, as this can hang when the connection is stuck)
+          const snap = await Promise.race([
+            getDocFromServer(ref).catch(() => null),
+            new Promise<null>((res) => setTimeout(() => res(null), 4000)),
+          ]);
+          data = snap?.exists() ? (snap.data() as Record<string, unknown>) : undefined;
+        }
+        if (data && !cancelled && apply(data as unknown as Room) && before >= 0) {
+          // We were behind, so the live connection has stalled: give it a kick
+          void restartConnection();
+        }
+      } finally {
+        checking = false;
+      }
     };
-    const onVisible = () => document.visibilityState === "visible" && check();
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void restartConnection(); // fresh connection after being away
+      void check();
+    };
+    const onFocus = () => void check();
 
     ensureSignedIn()
       .then(async (user) => {
@@ -78,17 +107,17 @@ export default function ChallengeRoom({ code }: { code: string }) {
           },
           () => setStatus("error"),
         );
-        // Check every 3s during a game, and every 5s in the lobby or on the results screen
+        // Check every 2s during a game, and every 4s in the lobby or on the results screen
         // (so a stalled phone still sees the game start)
         let tick = 0;
         poll = setInterval(() => {
           tick++;
           if (document.visibilityState !== "visible") return;
-          if (playing ? tick % 3 === 0 : tick % 5 === 0) check();
+          if (playing ? tick % 2 === 0 : tick % 4 === 0) void check();
         }, 1000);
         document.addEventListener("visibilitychange", onVisible);
-        window.addEventListener("online", check);
-        window.addEventListener("focus", check);
+        window.addEventListener("online", onVisible);
+        window.addEventListener("focus", onFocus);
       })
       .catch(() => setStatus("error"));
     loadDictionary().then(setDict, () => setError("Couldn't load the word list. Refresh to try again."));
@@ -97,8 +126,8 @@ export default function ChallengeRoom({ code }: { code: string }) {
       unsub();
       clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("online", check);
-      window.removeEventListener("focus", check);
+      window.removeEventListener("online", onVisible);
+      window.removeEventListener("focus", onFocus);
     };
   }, [code]);
 

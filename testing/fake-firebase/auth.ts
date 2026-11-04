@@ -1,7 +1,11 @@
 // Test stand-in for "firebase/auth": each browser tab is a different player
 export type Auth = object;
 export type User = { uid: string };
-export const getAuth = () => ({});
+export const getAuth = () => ({
+  get currentUser() {
+    return typeof window === "undefined" ? null : { uid: uid(), getIdToken: async () => "fake-token" };
+  },
+});
 export const connectAuthEmulator = () => {};
 function uid() {
   let id = sessionStorage.getItem("fake-uid");

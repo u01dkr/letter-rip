@@ -9,7 +9,14 @@ import {
   type Auth,
   type User,
 } from "firebase/auth";
-import { getFirestore, connectFirestoreEmulator, type Firestore } from "firebase/firestore";
+import {
+  getFirestore,
+  initializeFirestore,
+  connectFirestoreEmulator,
+  disableNetwork,
+  enableNetwork,
+  type Firestore,
+} from "firebase/firestore";
 
 const config = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -27,7 +34,23 @@ function fb() {
   if (!cached) {
     const app = getApps().length ? getApps()[0] : initializeApp(config);
     const auth = getAuth(app);
-    const db = getFirestore(app);
+    // iPhones and iPads: use Firebase's steadier "long polling" connection, which copes
+    // better with Safari pausing the page. Everyone else keeps the faster default.
+    const isApple =
+      typeof navigator !== "undefined" &&
+      (/iPhone|iPad|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
+    let db: Firestore;
+    try {
+      db = isApple
+        ? initializeFirestore(app, {
+            experimentalForceLongPolling: true,
+            experimentalLongPollingOptions: { timeoutSeconds: 10 },
+          })
+        : getFirestore(app);
+    } catch {
+      db = getFirestore(app); // already set up
+    }
     // Local testing only
     if (process.env.NEXT_PUBLIC_USE_EMULATOR === "1") {
       connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
@@ -39,6 +62,22 @@ function fb() {
 }
 
 export const getDb = () => fb().db;
+
+/** Drops and reopens the live connection. Used when a phone finds it has fallen behind. */
+let restarting = false;
+export async function restartConnection() {
+  if (restarting) return;
+  restarting = true;
+  try {
+    const db = fb().db;
+    await disableNetwork(db);
+    await enableNetwork(db);
+  } catch {
+    /* ignore */
+  } finally {
+    restarting = false;
+  }
+}
 
 /** Every player gets a hidden anonymous ID, so no sign-up is needed.
  *  The browser remembers it, so refreshing the page rejoins the game. */

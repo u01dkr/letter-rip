@@ -13,6 +13,9 @@ export class Timestamp {
   toMillis() { return this.ms; }
 }
 export const getFirestore = () => ({});
+export const initializeFirestore = () => ({});
+export const disableNetwork = async () => {};
+export const enableNetwork = async () => {};
 export const connectFirestoreEmulator = () => {};
 export const doc = (_db: unknown, ...parts: string[]): Ref => ({ path: parts.join("/") });
 export const deleteField = () => DELETE;
@@ -68,7 +71,11 @@ const snap = (r: Ref) => {
 const lag = () => new Promise((res) => setTimeout(res, 30 + Math.random() * 60)); // pretend network
 
 export async function getDoc(r: Ref) { await lag(); return snap(r); }
-export const getDocFromServer = getDoc;
+// With __dropLive set, mimic a completely stuck connection: server fetches never come back
+export async function getDocFromServer(r: Ref) {
+  if ((globalThis as any).__dropLive) return new Promise<never>(() => {});
+  return getDoc(r);
+}
 export async function setDoc(r: Ref, data: any) { await lag(); write(r, data); }
 export async function updateDoc(r: Ref, upd: any) {
   await lag();
