@@ -23,15 +23,16 @@ export default function ChallengeCard() {
     return (
       <div className="rounded-3xl border-2 border-dashed border-ink-3 p-4">
         <div className="font-display text-xl font-extrabold text-paper/90">Challenge</div>
-        <div className="text-sm text-muted">
-          Needs the Firebase settings adding in Vercel (see the README).
-        </div>
+        <div className="text-sm text-muted">Needs the Firebase settings adding in Vercel (see the README).</div>
       </div>
     );
   }
 
   const n = cleanName(name);
-  const c = code.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
+  const c = code
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "")
+    .slice(0, 4);
 
   function needName() {
     if (n) return false;
@@ -64,7 +65,9 @@ export default function ChallengeCard() {
   return (
     <div className="rounded-3xl bg-ink-2 border-2 border-ink-3 p-5">
       <div className="font-display text-2xl font-extrabold">Challenge</div>
-      <div className="text-sm text-muted">2–8 players on their own phones · three strikes and you&apos;re out</div>
+      <div className="text-sm text-muted">
+        2–8 players on their own phones · Letter Rip or Word Ladder · three strikes and you&apos;re out
+      </div>
 
       <label className="block mt-4 text-xs uppercase tracking-wider text-muted" htmlFor="rip-name">
         Your name

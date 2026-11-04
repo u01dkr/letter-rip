@@ -1,15 +1,26 @@
 // Scores saved on this device (no account needed).
 
+export type Game = "rip" | "ladder";
 export type DailyResult = { score: number; words: string[]; possible: number };
 
 type Stats = {
-  daily: Record<string, DailyResult>; // keyed by YYYY-MM-DD
+  daily: Record<string, DailyResult>; // Letter Rip, keyed by YYYY-MM-DD
   bestQuick: number;
   bestKids: number;
+  ladderDaily: Record<string, DailyResult>; // Word Ladder
+  ladderBestQuick: number;
+  ladderBestKids: number;
 };
 
 const KEY = "letter-rip-stats-v1";
-const EMPTY: Stats = { daily: {}, bestQuick: 0, bestKids: 0 };
+const EMPTY: Stats = {
+  daily: {},
+  bestQuick: 0,
+  bestKids: 0,
+  ladderDaily: {},
+  ladderBestQuick: 0,
+  ladderBestKids: 0,
+};
 
 export function loadStats(): Stats {
   try {
@@ -28,18 +39,34 @@ function save(stats: Stats) {
   }
 }
 
-export function saveDaily(key: string, result: DailyResult) {
+const dailyField = (game: Game) => (game === "rip" ? "daily" : "ladderDaily");
+
+export function getDaily(game: Game, key: string): DailyResult | null {
+  return loadStats()[dailyField(game)][key] ?? null;
+}
+
+export function saveDaily(game: Game, key: string, result: DailyResult) {
   const s = loadStats();
-  if (!s.daily[key]) {
-    s.daily[key] = result; // only the first attempt counts
+  const f = dailyField(game);
+  if (!s[f][key]) {
+    s[f][key] = result; // only the first attempt counts
     save(s);
   }
 }
 
+function bestField(game: Game, mode: "quick" | "kids") {
+  if (game === "rip") return mode === "quick" ? "bestQuick" : "bestKids";
+  return mode === "quick" ? "ladderBestQuick" : "ladderBestKids";
+}
+
+export function getBest(game: Game, mode: "quick" | "kids"): number {
+  return loadStats()[bestField(game, mode)];
+}
+
 /** Saves a best score and returns true if it's a new record. */
-export function saveBest(mode: "quick" | "kids", score: number): boolean {
+export function saveBest(game: Game, mode: "quick" | "kids", score: number): boolean {
   const s = loadStats();
-  const field = mode === "quick" ? "bestQuick" : "bestKids";
+  const field = bestField(game, mode);
   if (score > s[field]) {
     s[field] = score;
     save(s);
@@ -49,11 +76,11 @@ export function saveBest(mode: "quick" | "kids", score: number): boolean {
 }
 
 /** Consecutive days with a daily result, counting back from today. */
-export function dailyStreak(todayKey: string): number {
-  const s = loadStats();
+export function dailyStreak(game: Game, todayKey: string): number {
+  const daily = loadStats()[dailyField(game)];
   let streak = 0;
   const d = new Date(todayKey + "T12:00:00Z");
-  while (s.daily[d.toISOString().slice(0, 10)]) {
+  while (daily[d.toISOString().slice(0, 10)]) {
     streak++;
     d.setUTCDate(d.getUTCDate() - 1);
   }

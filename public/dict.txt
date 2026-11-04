@@ -4835,7 +4835,6 @@ bones*
 boneyard
 bonfire*
 bonfires*
-bong
 bonged
 bonging
 bongo
@@ -10742,7 +10741,6 @@ daftly
 daftness
 dagger*
 daggers*
-dago
 dagoes
 dagos
 dags
@@ -12933,7 +12931,6 @@ donating*
 donation*
 donations*
 done*
-dong
 donged
 donging
 dongle
@@ -17712,7 +17709,6 @@ friends*
 fries*
 frieze*
 friezes*
-frig
 frigate*
 frigates*
 frigged
@@ -18412,7 +18408,6 @@ gay*
 gayer*
 gayest*
 gayness
-gays*
 gaze*
 gazebo
 gazebos
@@ -19149,7 +19144,6 @@ googling
 googly
 gooier*
 gooiest*
-gook
 gooks
 goon*
 goons*
@@ -21221,7 +21215,6 @@ hoedown
 hoedowns
 hoeing*
 hoers
-hoes*
 hog*
 hogan
 hogans
@@ -21782,7 +21775,6 @@ humour*
 humoured*
 humouring*
 humours*
-hump*
 humpback
 humpbacks
 humped*
@@ -24018,7 +24010,6 @@ kidskin
 kielbasa
 kielbasas
 kielbasi
-kike
 kikes
 kill*
 killdeer
@@ -24089,7 +24080,6 @@ kingpin
 kingpins
 kings*
 kingship
-kink*
 kinked*
 kinkier*
 kinkiest*
@@ -29587,7 +29577,6 @@ nucleolus
 nucleon
 nucleons
 nucleus*
-nude*
 nuder*
 nudes*
 nudest*
@@ -30338,7 +30327,6 @@ organza
 orgasmic
 orgiastic
 orgies*
-orgy*
 oriel
 oriels
 orient*
@@ -32512,7 +32500,6 @@ pimento
 pimentos
 pimiento
 pimientos
-pimp
 pimped
 pimpernel
 pimping
@@ -34738,7 +34725,6 @@ pushovers*
 pushpin
 pushpins
 pushy*
-puss*
 pusses*
 pussier*
 pussiest*
@@ -35360,7 +35346,6 @@ rants*
 rap*
 rapacious
 rapacity
-rape*
 raped*
 raper
 rapers
@@ -39738,7 +39723,6 @@ sextuplet
 sexual*
 sexuality*
 sexually*
-sexy*
 shabbier*
 shabbiest*
 shabbily*
@@ -42295,7 +42279,6 @@ spheroids
 sphincter
 sphinx*
 sphinxes*
-spic
 spice*
 spiced*
 spices*
@@ -46151,7 +46134,6 @@ toilette
 toiling*
 toils*
 toilsome
-toke
 toked
 token*
 tokenism
@@ -50632,7 +50614,6 @@ woefuller
 woefully
 woes*
 wog
-wogs
 wok*
 woke*
 woken*

@@ -6,20 +6,13 @@ import { doc, getDocFromServer, onSnapshot } from "firebase/firestore";
 import { ensureSignedIn, firebaseReady, getDb } from "@/lib/firebase";
 import { serverNow, syncClock } from "@/lib/clock";
 import { checkGuess, loadDictionary, REASON_TEXT, type Dictionary } from "@/lib/words";
-import {
-  MAX_STRIKES,
-  ROOMS,
-  playerColour,
-  playersByJoin,
-  standings,
-  type Room,
-  type RoomEvent,
-} from "@/lib/challenge";
+import { MAX_STRIKES, ROOMS, playerColour, playersByJoin, standings, type Room, type RoomEvent } from "@/lib/challenge";
 import {
   ackTurn,
   joinRoom,
   leaveLobby,
   playAgain,
+  setGame,
   setLevel,
   startGame,
   strikeAt,
@@ -27,7 +20,10 @@ import {
   timeoutTurn,
 } from "@/lib/challengeActions";
 import { cleanName, loadName, saveName } from "@/lib/profile";
+import { checkLadder, isDeadEnd, LADDER_REASON } from "@/lib/ladder";
 import TileInput, { type Feedback } from "./TileInput";
+import LadderInput from "./LadderInput";
+import { LadderTrail } from "./LadderSolo";
 
 type Status = "connecting" | "ready" | "missing" | "error";
 
@@ -80,9 +76,16 @@ export default function ChallengeRoom({ code }: { code: string }) {
             if (!snap.exists()) return setStatus("missing");
             apply(snap.data() as Room);
           },
-          () => setStatus("error")
+          () => setStatus("error"),
         );
-        poll = setInterval(() => playing && document.visibilityState === "visible" && check(), 3000);
+        // Check every 3s during a game, and every 5s in the lobby or on the results screen
+        // (so a stalled phone still sees the game start)
+        let tick = 0;
+        poll = setInterval(() => {
+          tick++;
+          if (document.visibilityState !== "visible") return;
+          if (playing ? tick % 3 === 0 : tick % 5 === 0) check();
+        }, 1000);
         document.addEventListener("visibilitychange", onVisible);
         window.addEventListener("online", check);
         window.addEventListener("focus", check);
@@ -116,8 +119,7 @@ export default function ChallengeRoom({ code }: { code: string }) {
         <HomeLink />
       </Centered>
     );
-  if (!room || !uid || !dict)
-    return <Centered>{error || <span className="text-muted">Connecting…</span>}</Centered>;
+  if (!room || !uid || !dict) return <Centered>{error || <span className="text-muted">Connecting…</span>}</Centered>;
 
   const me = room.players[uid];
   if (!me) return <JoinScreen code={code} room={room} uid={uid} />;
@@ -183,7 +185,7 @@ function JoinScreen({ code, room, uid }: { code: string; room: Room; uid: string
         setBusy(false);
       }
     },
-    [code, uid]
+    [code, uid],
   );
 
   // If we already know your name, join straight away
@@ -218,11 +220,7 @@ function JoinScreen({ code, room, uid }: { code: string; room: Room; uid: string
         autoFocus
         className="mt-6 w-full h-14 rounded-xl bg-ink-2 px-4 text-xl text-center text-paper placeholder:text-muted/60 outline-none border-2 border-ink-3 focus:border-sun"
       />
-      <button
-        onClick={() => join(n)}
-        disabled={!n || busy}
-        className="btn mt-3 w-full h-14 bg-rip text-ink text-lg"
-      >
+      <button onClick={() => join(n)} disabled={!n || busy} className="btn mt-3 w-full h-14 bg-rip text-ink text-lg">
         {busy ? "Joining…" : "Join"}
       </button>
       {error && <p className="mt-3 text-berry font-semibold text-sm">{error}</p>}
@@ -233,6 +231,7 @@ function JoinScreen({ code, room, uid }: { code: string; room: Room; uid: string
 /* ---------- lobby ---------- */
 
 function Lobby({ code, room, uid }: { code: string; room: Room; uid: string }) {
+  const game = room.game ?? "rip";
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const isHost = room.hostId === uid;
@@ -291,13 +290,30 @@ function Lobby({ code, room, uid }: { code: string; room: Room; uid: string }) {
             </li>
           ))}
         </ul>
-        {players.length < 2 && (
-          <p className="text-sm text-muted mt-3">Waiting for at least one more player…</p>
-        )}
+        {players.length < 2 && <p className="text-sm text-muted mt-3">Waiting for at least one more player…</p>}
       </section>
 
       <section className="rounded-3xl bg-ink-2 border border-ink-3 p-4">
-        <h2 className="font-display font-bold text-lg mb-3">Words</h2>
+        <h2 className="font-display font-bold text-lg mb-3">Game</h2>
+        <div className="grid grid-cols-2 gap-2">
+          {(["rip", "ladder"] as const).map((g) => (
+            <button
+              key={g}
+              disabled={!isHost}
+              onClick={() => setGame(code, g)}
+              className={`btn h-14 text-left px-3 border-2 ${
+                game === g ? "bg-paper text-ink border-paper" : "bg-transparent text-paper border-ink-3"
+              }`}
+              style={!isHost ? { opacity: game === g ? 1 : 0.4 } : undefined}
+            >
+              <div>{g === "rip" ? "Letter Rip" : "Word Ladder"}</div>
+              <div className="text-xs font-sans font-medium opacity-75">
+                {g === "rip" ? "Words from a big word" : "Change one letter"}
+              </div>
+            </button>
+          ))}
+        </div>
+        <h2 className="font-display font-bold text-lg mb-3 mt-5">Words</h2>
         <div className="grid grid-cols-2 gap-2">
           {(["normal", "easy"] as const).map((lvl) => (
             <button
@@ -311,21 +327,38 @@ function Lobby({ code, room, uid }: { code: string; room: Room; uid: string }) {
             >
               <div>{lvl === "normal" ? "Normal" : "Kids"}</div>
               <div className="text-xs font-sans font-medium opacity-75">
-                {lvl === "normal" ? "7–9 letters · 20s turns" : "6–7 letters · 30s turns"}
+                {game === "ladder"
+                  ? lvl === "normal"
+                    ? "15s turns"
+                    : "Easier words · 25s turns"
+                  : lvl === "normal"
+                    ? "7–9 letters · 20s turns"
+                    : "6–7 letters · 30s turns"}
               </div>
             </button>
           ))}
         </div>
       </section>
 
-      <section className="text-sm text-paper/80 space-y-1.5 px-1">
-        <p>Take turns making a word from the big word. No repeats!</p>
-        <p>Run out of time and you get a strike. Three strikes and you&apos;re out.</p>
-        <p>
-          Use <b>every</b> letter in a different word for a <span className="text-sun font-bold">Full Rip</span>: it
-          wipes off a strike.
-        </p>
-      </section>
+      {game === "ladder" ? (
+        <section className="text-sm text-paper/80 space-y-1.5 px-1">
+          <p>Take turns changing one letter to make a new word: LOVE → MOVE → MODE… No repeats!</p>
+          <p>Run out of time and you get a strike. Three strikes and you&apos;re out.</p>
+          <p>
+            Leave the next player a <b>dead end</b> (no possible move) and they get a strike straight away. Make it
+            tricky for them!
+          </p>
+        </section>
+      ) : (
+        <section className="text-sm text-paper/80 space-y-1.5 px-1">
+          <p>Take turns making a word from the big word. No repeats!</p>
+          <p>Run out of time and you get a strike. Three strikes and you&apos;re out.</p>
+          <p>
+            Use <b>every</b> letter in a different word for a <span className="text-sun font-bold">Full Rip</span>: it
+            wipes off a strike.
+          </p>
+        </section>
+      )}
 
       <div className="flex flex-col gap-2">
         {isHost ? (
@@ -352,9 +385,13 @@ function Lobby({ code, room, uid }: { code: string; room: Room; uid: string }) {
 
 /* ---------- the game ---------- */
 
-function eventText(e: RoomEvent | undefined, room: Room, uid: string): { text: string; tone: "good" | "bad" | "info" } | null {
+function eventText(
+  e: RoomEvent | undefined,
+  room: Room,
+  uid: string,
+): { text: string; tone: "good" | "bad" | "info" } | null {
   if (!e) return null;
-  const who = (id: string) => (id === uid ? "You" : room.players[id]?.name ?? "Someone");
+  const who = (id: string) => (id === uid ? "You" : (room.players[id]?.name ?? "Someone"));
   switch (e.kind) {
     case "start":
       return { text: "Here we go!", tone: "info" };
@@ -369,7 +406,16 @@ function eventText(e: RoomEvent | undefined, room: Room, uid: string): { text: s
       return { text: `${who(e.uid)} ran out of time: strike ${e.strikes}!`, tone: "bad" };
     case "out":
       return { text: `${who(e.uid)} ${e.uid === uid ? "are" : "is"} out!`, tone: "bad" };
+    case "deadend":
+      return {
+        text:
+          `${who(e.by)} played ${e.word.toUpperCase()}: dead end! ` +
+          `${who(e.uid)} ${e.uid === uid ? "are" : "is"} left holding the can` +
+          (e.out ? " and out!" : `: strike ${e.strikes}!`),
+        tone: "bad",
+      };
   }
+  return null;
 }
 
 const SUBMIT_TEXT: Record<string, string> = {
@@ -377,6 +423,7 @@ const SUBMIT_TEXT: Record<string, string> = {
   late: "Too late!",
   notYourTurn: "Not your turn",
   over: "Game over",
+  moved: "The word has changed, try again",
 };
 
 function Game({ code, room, uid, dict }: { code: string; room: Room; uid: string; dict: Dictionary }) {
@@ -426,6 +473,22 @@ function Game({ code, room, uid, dict }: { code: string; room: Room; uid: string
 
   const usedSet = useMemo(() => new Set(room.used.map((u) => u.w)), [room.used]);
 
+  const isLadder = room.game === "ladder";
+
+  const submitLadder = useCallback(
+    async (raw: string): Promise<Feedback> => {
+      const check = checkLadder(raw, room.root, usedSet, dict);
+      if (!check.ok) {
+        return { good: false, text: check.reason === "used" ? SUBMIT_TEXT.used : LADDER_REASON[check.reason] };
+      }
+      const deadEnd = isDeadEnd(check.word, new Set([...usedSet, check.word]), dict);
+      const res = await submitWord(code, uid, room.turnNo, check.word, deadEnd);
+      if (!res.ok) return { good: false, text: SUBMIT_TEXT[res.reason] ?? "Try again" };
+      return { good: true, text: res.deadEnd ? "Dead end for them!" : "Nice!" };
+    },
+    [room.root, room.turnNo, usedSet, dict, code, uid],
+  );
+
   const submit = useCallback(
     async (word: string): Promise<Feedback> => {
       const check = checkGuess(word, room.root, usedSet, dict);
@@ -439,7 +502,7 @@ function Game({ code, room, uid, dict }: { code: string; room: Room; uid: string
       if (!res.ok) return { good: false, text: SUBMIT_TEXT[res.reason] ?? "Try again" };
       return { good: true, text: res.fullRip ? "FULL RIP!" : "Nice!" };
     },
-    [room.root, room.turnNo, usedSet, dict, code, uid]
+    [room.root, room.turnNo, usedSet, dict, code, uid],
   );
 
   const ev = eventText(room.last, room, uid);
@@ -522,34 +585,54 @@ function Game({ code, room, uid, dict }: { code: string; room: Room; uid: string
         )}
       </div>
 
-      {/* Tiles: only live on your turn, but everyone can see (and shuffle) them */}
-      <TileInput
-        key={room.root}
-        root={room.root}
-        disabled={!myTurn || paused || leftMs <= 0 || me.out}
-        placeholder={
-          me.out ? "You're out. Watch the others battle it out!" : myTurn ? undefined : "Get your next word ready…"
-        }
-        onSubmit={submit}
-      />
+      {isLadder ? (
+        <>
+          <LadderInput
+            key={room.root}
+            word={room.root}
+            disabled={!myTurn || paused || leftMs <= 0 || me.out}
+            placeholder={
+              me.out ? "You're out. Watch the others battle it out!" : myTurn ? undefined : "Plan your move…"
+            }
+            onSubmit={submitLadder}
+          />
+          <LadderTrail
+            chain={room.used.map((u) => u.w)}
+            colours={(i) => (room.used[i]?.by === "start" ? undefined : playerColour(room, room.used[i]?.by))}
+          />
+        </>
+      ) : (
+        <>
+          {/* Tiles: only live on your turn, but everyone can see (and shuffle) them */}
+          <TileInput
+            key={room.root}
+            root={room.root}
+            disabled={!myTurn || paused || leftMs <= 0 || me.out}
+            placeholder={
+              me.out ? "You're out. Watch the others battle it out!" : myTurn ? undefined : "Get your next word ready…"
+            }
+            onSubmit={submit}
+          />
 
-      {/* Words played on this root */}
-      <div className="flex-1 rounded-2xl bg-ink-2/70 border border-ink-3 p-3">
-        <div className="text-xs uppercase tracking-wider text-muted mb-2">
-          Used · {room.used.length} {room.used.length === 1 ? "word" : "words"}
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {[...room.used].reverse().map((u) => (
-            <span
-              key={u.w}
-              className="pop px-2.5 py-1 rounded-lg text-sm font-semibold uppercase tracking-wide bg-ink-3 text-paper border-l-4"
-              style={{ borderLeftColor: playerColour(room, u.by) }}
-            >
-              {u.w}
-            </span>
-          ))}
-        </div>
-      </div>
+          {/* Words played on this root */}
+          <div className="flex-1 rounded-2xl bg-ink-2/70 border border-ink-3 p-3">
+            <div className="text-xs uppercase tracking-wider text-muted mb-2">
+              Used · {room.used.length} {room.used.length === 1 ? "word" : "words"}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {[...room.used].reverse().map((u) => (
+                <span
+                  key={u.w}
+                  className="pop px-2.5 py-1 rounded-lg text-sm font-semibold uppercase tracking-wide bg-ink-3 text-paper border-l-4"
+                  style={{ borderLeftColor: playerColour(room, u.by) }}
+                >
+                  {u.w}
+                </span>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </main>
   );
 }
@@ -559,7 +642,7 @@ function Game({ code, room, uid, dict }: { code: string; room: Room; uid: string
 function GameOver({ code, room, uid }: { code: string; room: Room; uid: string }) {
   const order = standings(room);
   const winner = room.winner ?? order[0];
-  const winnerName = winner === uid ? "You" : room.players[winner]?.name ?? "Someone";
+  const winnerName = winner === uid ? "You" : (room.players[winner]?.name ?? "Someone");
   const ev = eventText(room.last, room, uid);
 
   return (

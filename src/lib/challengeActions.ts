@@ -4,6 +4,8 @@ import { doc, getDoc, setDoc, runTransaction, deleteField } from "firebase/fires
 import { getDb } from "./firebase";
 import { serverNow } from "./clock";
 import { randomRoot, type Level } from "./words";
+import { oneLetterApart, randomLadderStart } from "./ladder";
+import type { Game } from "./stats";
 import {
   ROOMS,
   MAX_PLAYERS,
@@ -16,6 +18,7 @@ import {
   turnSeconds,
   type Player,
   type Room,
+  type RoomEvent,
 } from "./challenge";
 
 const roomRef = (code: string) => doc(getDb(), ROOMS, code);
@@ -29,13 +32,19 @@ const newPlayer = (name: string): Player => ({
   fullRips: 0,
 });
 
-function pickRoot(level: Level, usedRoots: string[]): string {
+const gameOf = (room: Pick<Room, "game">): Game => room.game ?? "rip";
+
+function pickRoot(game: Game, level: Level, usedRoots: string[]): string {
+  if (game === "ladder") return randomLadderStart(level, usedRoots);
   for (let i = 0; i < 20; i++) {
     const r = randomRoot(level);
     if (!usedRoots.includes(r)) return r;
   }
   return randomRoot(level);
 }
+
+/** Words already played on a new root. Word Ladder counts the start word as used. */
+const freshUsed = (game: Game, root: string) => (game === "ladder" ? [{ w: root, by: "start" }] : []);
 
 export async function createRoom(uid: string, name: string): Promise<string> {
   for (let i = 0; i < 10; i++) {
@@ -46,6 +55,7 @@ export async function createRoom(uid: string, name: string): Promise<string> {
     const room: Partial<Room> = {
       hostId: uid,
       phase: "lobby",
+      game: "rip",
       level: "normal",
       createdAt: Date.now(),
       players: { [uid]: newPlayer(name) },
@@ -103,6 +113,15 @@ export async function setLevel(code: string, level: Level) {
   });
 }
 
+export async function setGame(code: string, game: Game) {
+  await runTransaction(getDb(), async (tx) => {
+    const snap = await tx.get(roomRef(code));
+    const room = snap.data() as Room;
+    if (!room || room.phase !== "lobby") return;
+    tx.update(roomRef(code), { game, rev: (room.rev ?? 0) + 1 });
+  });
+}
+
 export async function startGame(code: string, uid: string) {
   await runTransaction(getDb(), async (tx) => {
     const snap = await tx.get(roomRef(code));
@@ -113,7 +132,8 @@ export async function startGame(code: string, uid: string) {
     const order = [...ids].sort(() => Math.random() - 0.5);
     const players: Record<string, Player> = {};
     for (const id of ids) players[id] = { ...newPlayer(room.players[id].name), joinedAt: room.players[id].joinedAt };
-    const root = pickRoot(room.level, room.usedRoots ?? []);
+    const game = gameOf(room);
+    const root = pickRoot(game, room.level, room.usedRoots ?? []);
     const pauseUntil = serverNow() + PAUSE_MS;
     tx.update(roomRef(code), {
       phase: "playing",
@@ -121,11 +141,11 @@ export async function startGame(code: string, uid: string) {
       order,
       root,
       usedRoots: [...(room.usedRoots ?? []), root].slice(-200),
-      used: [],
+      used: freshUsed(game, root),
       turn: order[0],
       turnNo: 1,
       pauseUntil,
-      turnEndsAt: pauseUntil + turnSeconds(room.level, 0) * 1000,
+      turnEndsAt: pauseUntil + turnSeconds(room.level, 0, game) * 1000,
       turnSeenAt: null,
       last: { id: 1, kind: "start" },
       outOrder: [],
@@ -154,14 +174,68 @@ export async function ackTurn(code: string, uid: string, turnNo: number) {
     tx.update(roomRef(code), {
       turnSeenAt: now,
       pauseUntil: start,
-      turnEndsAt: start + turnSeconds(room.level, room.used.length) * 1000,
+      turnEndsAt: start + turnSeconds(room.level, room.used.length, gameOf(room)) * 1000,
       rev: (room.rev ?? 0) + 1,
     });
   });
 }
 
-/** Plays a word. The word has already been checked against the dictionary on the player's phone. */
-export async function submitWord(code: string, uid: string, turnNo: number, word: string) {
+/**
+ * Gives `uid` a strike and deals a fresh word (or ends the game if only one player is left).
+ * `players` may already include other changes from the same move.
+ */
+function strikeUpdate(
+  room: Room,
+  players: Record<string, Player>,
+  uid: string,
+  event: (strikes: number, out: boolean, id: number) => RoomEvent
+): Record<string, unknown> {
+  const strikes = players[uid].strikes + 1;
+  const out = strikes >= MAX_STRIKES;
+  const after = { ...players, [uid]: { ...players[uid], strikes, out } };
+  const outOrder = out ? [...room.outOrder, uid] : room.outOrder;
+  const alive = alivePlayers({ order: room.order, players: after });
+  const id = room.turnNo + 1;
+
+  if (alive.length <= 1) {
+    return {
+      phase: "over",
+      players: after,
+      outOrder,
+      winner: alive[0] ?? uid,
+      turnNo: id,
+      rev: (room.rev ?? 0) + 1,
+      last: event(strikes, out, id),
+    };
+  }
+
+  // Fresh word; the next player still in starts
+  const game = gameOf(room);
+  const root = pickRoot(game, room.level, room.usedRoots ?? []);
+  const next = nextAlive({ order: room.order, players: after }, uid);
+  const pauseUntil = serverNow() + PAUSE_MS;
+  return {
+    players: after,
+    outOrder,
+    root,
+    usedRoots: [...(room.usedRoots ?? []), root].slice(-200),
+    used: freshUsed(game, root),
+    turn: next,
+    turnNo: id,
+    pauseUntil,
+    turnEndsAt: pauseUntil + turnSeconds(room.level, 0, game) * 1000,
+    turnSeenAt: null,
+    rev: (room.rev ?? 0) + 1,
+    last: event(strikes, out, id),
+  };
+}
+
+/**
+ * Plays a word. The word has already been checked against the dictionary on the player's phone.
+ * Word Ladder: `deadEnd` is true if the word leaves the next player with no possible move,
+ * in which case they're left holding the can and get a strike straight away.
+ */
+export async function submitWord(code: string, uid: string, turnNo: number, word: string, deadEnd = false) {
   return runTransaction(getDb(), async (tx) => {
     const snap = await tx.get(roomRef(code));
     const room = snap.data() as Room;
@@ -170,11 +244,47 @@ export async function submitWord(code: string, uid: string, turnNo: number, word
     if (serverNow() > room.turnEndsAt + SUBMIT_GRACE_MS) return { ok: false as const, reason: "late" };
     if (room.used.some((u) => u.w === word)) return { ok: false as const, reason: "used" };
 
+    const game = gameOf(room);
     const me = room.players[uid];
+    const next = nextAlive(room, uid);
+
+    if (game === "ladder") {
+      if (!oneLetterApart(word, room.root)) return { ok: false as const, reason: "moved" };
+      const players = { ...room.players, [uid]: { ...me, words: me.words + 1 } };
+      if (deadEnd && next !== uid) {
+        tx.update(
+          roomRef(code),
+          strikeUpdate(room, players, next, (strikes, out, id) => ({
+            id,
+            kind: "deadend",
+            uid: next,
+            by: uid,
+            word,
+            strikes,
+            out,
+          }))
+        );
+        return { ok: true as const, fullRip: false, savedStrike: false, deadEnd: true };
+      }
+      const now = serverNow();
+      tx.update(roomRef(code), {
+        root: word,
+        used: [...room.used, { w: word, by: uid }],
+        players,
+        turn: next,
+        turnNo: room.turnNo + 1,
+        pauseUntil: now,
+        turnEndsAt: now + turnSeconds(room.level, 0, game) * 1000,
+        turnSeenAt: null,
+        rev: (room.rev ?? 0) + 1,
+        last: { id: room.turnNo + 1, kind: "word", uid, word },
+      });
+      return { ok: true as const, fullRip: false, savedStrike: false, deadEnd: false };
+    }
+
     const fullRip = word.length === room.root.length && word !== room.root;
     const savedStrike = fullRip && me.strikes > 0;
     const used = [...room.used, { w: word, by: uid }];
-    const next = nextAlive(room, uid);
     const now = serverNow();
     tx.update(roomRef(code), {
       used,
@@ -191,7 +301,7 @@ export async function submitWord(code: string, uid: string, turnNo: number, word
         ? { id: room.turnNo + 1, kind: "fullrip", uid, word, savedStrike }
         : { id: room.turnNo + 1, kind: "word", uid, word },
     });
-    return { ok: true as const, fullRip, savedStrike };
+    return { ok: true as const, fullRip, savedStrike, deadEnd: false };
   });
 }
 
@@ -202,47 +312,13 @@ export async function timeoutTurn(code: string, turnNo: number) {
     const room = snap.data() as Room;
     if (!room || room.phase !== "playing" || room.turnNo !== turnNo) return;
     if (serverNow() < strikeAt(room) - 500) return; // too early
-
     const uid = room.turn;
-    const strikes = room.players[uid].strikes + 1;
-    const out = strikes >= MAX_STRIKES;
-    const players = { ...room.players, [uid]: { ...room.players[uid], strikes, out } };
-    const outOrder = out ? [...room.outOrder, uid] : room.outOrder;
-    const alive = alivePlayers({ order: room.order, players });
-
-    if (alive.length <= 1) {
-      tx.update(roomRef(code), {
-        phase: "over",
-        players,
-        outOrder,
-        winner: alive[0] ?? uid,
-        turnNo: room.turnNo + 1,
-        rev: (room.rev ?? 0) + 1,
-        last: { id: room.turnNo + 1, kind: out ? "out" : "strike", uid, strikes },
-      });
-      return;
-    }
-
-    // Fresh word; the next player still in starts
-    const root = pickRoot(room.level, room.usedRoots ?? []);
-    const next = nextAlive({ order: room.order, players }, uid);
-    const pauseUntil = serverNow() + PAUSE_MS;
-    tx.update(roomRef(code), {
-      players,
-      outOrder,
-      root,
-      usedRoots: [...(room.usedRoots ?? []), root].slice(-200),
-      used: [],
-      turn: next,
-      turnNo: room.turnNo + 1,
-      pauseUntil,
-      turnEndsAt: pauseUntil + turnSeconds(room.level, 0) * 1000,
-      turnSeenAt: null,
-      rev: (room.rev ?? 0) + 1,
-      last: out
-        ? { id: room.turnNo + 1, kind: "out", uid }
-        : { id: room.turnNo + 1, kind: "strike", uid, strikes },
-    });
+    tx.update(
+      roomRef(code),
+      strikeUpdate(room, room.players, uid, (strikes, out, id) =>
+        out ? { id, kind: "out", uid } : { id, kind: "strike", uid, strikes }
+      )
+    );
   });
 }
 

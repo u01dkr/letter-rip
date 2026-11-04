@@ -2,7 +2,7 @@
 // Run with: npm run words
 // Outputs:
 //   public/dict.txt      every accepted word, one per line; common words end in "*"
-//   src/data/roots.json  root words for normal and easy games
+//   src/data/roots.json  root words for normal and easy games, plus Word Ladder start words
 import { createRequire } from "node:module";
 import { writeFileSync, mkdirSync } from "node:fs";
 
@@ -13,7 +13,12 @@ const VARIANTS = ["english", "british"]; // British spellings for Irish players
 // Words that badwords-list flags but are harmless in a word game
 const ALLOW = new Set(["balls", "bloody", "breasts", "bum", "hell", "screw", "sex"]);
 // A few extra words to keep out
-const EXTRA_BLOCK = ["shag", "slag", "wank", "feck", "cunts", "pikey", "tinker"];
+const EXTRA_BLOCK = [
+  "shag", "slag", "wank", "feck", "cunts", "pikey", "tinker",
+  // four-letter words matter most for Word Ladder
+  "spic", "kike", "gook", "rape", "dago", "wogs", "kink", "orgy", "pimp", "hoes",
+  "dong", "puss", "frig", "sexy", "hump", "nude", "gays", "bong", "toke",
+];
 
 const blocked = new Set(
   [...require("badwords-list").array, ...EXTRA_BLOCK]
@@ -76,12 +81,40 @@ function pickRoots(pool, findable, minLen, maxLen, minSub) {
 const normal = pickRoots(normalPool, commonArr, 7, 9, 30);
 const easy = pickRoots(easyPool, easyArr, 6, 7, 12);
 
+// ----- Word Ladder start words -----
+// Everyday four-letter words with plenty of one-letter-change moves
+const NOT_A_START = new Set(["hell", "damn", "crap", "sued", "cant", "wont"]);
+function ladderStarts(pool, neighbourWords, minMoves) {
+  const set = new Set([...neighbourWords].filter((w) => w.length === 4));
+  const out = [];
+  for (const w of pool) {
+    if (w.length !== 4 || !notPlural(w) || NOT_A_START.has(w)) continue;
+    let n = 0;
+    for (let i = 0; i < 4; i++) {
+      for (let c = 97; c <= 122; c++) {
+        const ch = String.fromCharCode(c);
+        if (ch === w[i]) continue;
+        if (set.has(w.slice(0, i) + ch + w.slice(i + 1))) n++;
+      }
+    }
+    if (n >= minMoves) out.push(w);
+  }
+  return out.sort();
+}
+const ladder = {
+  normal: ladderStarts(wordsUpTo(20), common, 8),
+  easy: ladderStarts(wordsUpTo(10), easyCommon, 8),
+};
+
 mkdirSync("src/data", { recursive: true });
-writeFileSync("src/data/roots.json", JSON.stringify({ normal, easy }));
+writeFileSync("src/data/roots.json", JSON.stringify({ normal, easy, ladder }));
 const dict = [...accepted].sort().map((w) => (common.has(w) ? w + "*" : w));
 writeFileSync("public/dict.txt", dict.join("\n"));
 
 console.log(`accepted ${accepted.size}, common ${common.size}`);
 console.log(`roots: normal ${normal.length}, easy ${easy.length}`);
 console.log("sample normal:", normal.filter((_, i) => i % 40 === 0).join(" "));
+console.log(`ladder starts: normal ${ladder.normal.length}, easy ${ladder.easy.length}`);
+console.log("ladder normal:", ladder.normal.filter((_, i) => i % 6 === 0).join(" "));
+console.log("ladder easy:", ladder.easy.join(" "));
 console.log("sample easy:", easy.filter((_, i) => i % 8 === 0).join(" "));

@@ -19,8 +19,10 @@ export const deleteField = () => DELETE;
 export const serverTimestamp = () => STAMP;
 
 const key = (r: Ref) => "fs:" + r.path;
+// Newest copy of each document seen by this tab (localStorage can lag behind between tabs)
+const latest = new Map<string, string>();
 function read(r: Ref): any {
-  const raw = localStorage.getItem(key(r));
+  const raw = latest.get(r.path) ?? localStorage.getItem(key(r));
   if (!raw) return undefined;
   return JSON.parse(raw, (_k, v) => (v && v.__ts ? new Timestamp(v.__ts) : v));
 }
@@ -31,16 +33,22 @@ function fill(v: any): any {
   return v;
 }
 function write(r: Ref, data: any) {
-  localStorage.setItem(key(r), JSON.stringify(fill(data)));
+  const raw = JSON.stringify(fill(data));
+  localStorage.setItem(key(r), raw);
+  latest.set(r.path, raw);
   notify(r.path);
-  chan?.postMessage(r.path);
+  chan?.postMessage({ path: r.path, raw });
 }
 // Tests can set window.__dropLive = true to mimic a phone whose live updates have stalled
 function notify(path: string) {
   if ((globalThis as any).__dropLive) return;
   listeners.get(path)?.forEach((f) => setTimeout(f, 0));
 }
-if (chan) chan.onmessage = (e) => notify(e.data);
+if (chan)
+  chan.onmessage = (e) => {
+    latest.set(e.data.path, e.data.raw);
+    notify(e.data.path);
+  };
 
 function applyUpdate(cur: any, upd: Record<string, any>) {
   const next = structuredClone(cur ?? {});

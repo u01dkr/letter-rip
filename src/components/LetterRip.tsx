@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import SoloGame, { type SoloResult } from "./SoloGame";
 import Results from "./Results";
+import LadderSolo, { type LadderSoloResult } from "./LadderSolo";
+import LadderResults from "./LadderResults";
 import ChallengeCard from "./ChallengeCard";
 import {
   dailyNumber,
@@ -14,25 +16,36 @@ import {
   wordPoints,
   type Dictionary,
 } from "@/lib/words";
-import { dailyStreak, loadStats, saveBest, saveDaily, type DailyResult } from "@/lib/stats";
+import { dailyLadderStart, ladderSeconds, randomLadderStart } from "@/lib/ladder";
+import { dailyStreak, getBest, getDaily, saveBest, saveDaily, type DailyResult, type Game } from "@/lib/stats";
 
 type Mode = "daily" | "quick" | "kids";
 
-const MODES: Record<Mode, { title: string; seconds: number }> = {
+const RIP_MODES: Record<Mode, { title: string; seconds: number }> = {
   daily: { title: "Daily Rip", seconds: 120 },
   quick: { title: "Quick Rip", seconds: 120 },
   kids: { title: "Kids' Rip", seconds: 180 },
+};
+const LADDER_MODES: Record<Mode, { title: string }> = {
+  daily: { title: "Daily Ladder" },
+  quick: { title: "Quick Ladder" },
+  kids: { title: "Kids' Ladder" },
 };
 
 type Screen =
   | { kind: "home" }
   | { kind: "playing"; mode: Mode; root: string; game: number }
-  | { kind: "results"; mode: Mode; root: string; score: number; found: string[]; newBest: boolean };
+  | { kind: "results"; mode: Mode; root: string; score: number; found: string[]; newBest: boolean }
+  | { kind: "ladder"; mode: Mode; start: string; game: number }
+  | { kind: "ladderResults"; mode: Mode; chain: string[]; ending: LadderSoloResult["ending"]; newBest: boolean };
+
+const GAME_KEY = "letter-rip-game";
 
 export default function LetterRip() {
   const [dict, setDict] = useState<Dictionary | null>(null);
   const [dictError, setDictError] = useState(false);
   const [screen, setScreen] = useState<Screen>({ kind: "home" });
+  const [game, setGame] = useState<Game>("rip");
   const [today, setToday] = useState<string>("");
   const [todayResult, setTodayResult] = useState<DailyResult | null>(null);
   const [streak, setStreak] = useState(0);
@@ -44,21 +57,40 @@ export default function LetterRip() {
     loadDictionary().then(setDict, () => setDictError(true));
   }, []);
 
-  const refreshStats = useCallback(() => {
+  const refreshStats = useCallback((g: Game) => {
     const key = todayKey();
-    const s = loadStats();
     setToday(key);
-    setTodayResult(s.daily[key] ?? null);
-    setStreak(dailyStreak(key));
-    setBest({ quick: s.bestQuick, kids: s.bestKids });
+    setTodayResult(getDaily(g, key));
+    setStreak(dailyStreak(g, key));
+    setBest({ quick: getBest(g, "quick"), kids: getBest(g, "kids") });
   }, []);
 
   useEffect(() => {
     loadDictionary().then(setDict, () => setDictError(true));
-    // Saved scores live in the browser, so read them after the first render
-    const t = setTimeout(refreshStats, 0);
+    // Saved scores and the last game picked live in the browser, so read them after the first render
+    const t = setTimeout(() => {
+      let g: Game = "rip";
+      try {
+        if (localStorage.getItem(GAME_KEY) === "ladder") g = "ladder";
+      } catch {
+        /* ignore */
+      }
+      setGame(g);
+      refreshStats(g);
+    }, 0);
     return () => clearTimeout(t);
   }, [refreshStats]);
+
+  function switchGame(g: Game) {
+    setGame(g);
+    setShowRules(false);
+    refreshStats(g);
+    try {
+      localStorage.setItem(GAME_KEY, g);
+    } catch {
+      /* ignore */
+    }
+  }
 
   // Jump back to the top whenever the screen changes
   useEffect(() => {
@@ -66,28 +98,57 @@ export default function LetterRip() {
   }, [screen.kind]);
 
   function start(mode: Mode) {
-    const root =
-      mode === "daily" ? dailyRoot(todayKey()) : randomRoot(mode === "kids" ? "easy" : "normal");
+    if (game === "ladder") {
+      const s = mode === "daily" ? dailyLadderStart(todayKey()) : randomLadderStart(mode === "kids" ? "easy" : "normal");
+      setScreen({ kind: "ladder", mode, start: s, game: Date.now() });
+      return;
+    }
+    const root = mode === "daily" ? dailyRoot(todayKey()) : randomRoot(mode === "kids" ? "easy" : "normal");
     setScreen({ kind: "playing", mode, root, game: Date.now() });
   }
 
-  const finish = useCallback(
+  const finishRip = useCallback(
     (mode: Mode) => (r: SoloResult) => {
       let newBest = false;
       if (mode === "daily") {
         const possible = dict ? findableWords(r.root, dict).length : 0;
-        saveDaily(todayKey(), { score: r.score, words: r.found, possible });
+        saveDaily("rip", todayKey(), { score: r.score, words: r.found, possible });
       } else {
-        newBest = saveBest(mode, r.score);
+        newBest = saveBest("rip", mode, r.score);
       }
-      refreshStats();
+      refreshStats("rip");
       setScreen({ kind: "results", mode, root: r.root, score: r.score, found: r.found, newBest });
     },
     [dict, refreshStats]
   );
 
+  const finishLadder = useCallback(
+    (mode: Mode) => (r: LadderSoloResult) => {
+      const rungs = r.chain.length - 1;
+      let newBest = false;
+      if (mode === "daily") {
+        saveDaily("ladder", todayKey(), { score: rungs, words: r.chain, possible: r.ending === "deadend" ? 1 : 0 });
+      } else {
+        newBest = saveBest("ladder", mode, rungs);
+      }
+      refreshStats("ladder");
+      setScreen({ kind: "ladderResults", mode, chain: r.chain, ending: r.ending, newBest });
+    },
+    [refreshStats]
+  );
+
   function showTodayResults() {
     if (!todayResult) return;
+    if (game === "ladder") {
+      setScreen({
+        kind: "ladderResults",
+        mode: "daily",
+        chain: todayResult.words,
+        ending: todayResult.possible ? "deadend" : "timeout",
+        newBest: false,
+      });
+      return;
+    }
     setScreen({
       kind: "results",
       mode: "daily",
@@ -98,16 +159,33 @@ export default function LetterRip() {
     });
   }
 
+  const home = () => setScreen({ kind: "home" });
+  const origin = typeof window !== "undefined" ? `\n${window.location.origin}` : "";
+
   if (screen.kind === "playing" && dict) {
     return (
       <SoloGame
         key={screen.game}
         root={screen.root}
-        seconds={MODES[screen.mode].seconds}
+        seconds={RIP_MODES[screen.mode].seconds}
         dict={dict}
-        title={MODES[screen.mode].title}
-        onFinish={finish(screen.mode)}
-        onQuit={() => setScreen({ kind: "home" })}
+        title={RIP_MODES[screen.mode].title}
+        onFinish={finishRip(screen.mode)}
+        onQuit={home}
+      />
+    );
+  }
+
+  if (screen.kind === "ladder" && dict) {
+    return (
+      <LadderSolo
+        key={screen.game}
+        start={screen.start}
+        seconds={ladderSeconds(screen.mode === "kids" ? "easy" : "normal")}
+        dict={dict}
+        title={LADDER_MODES[screen.mode].title}
+        onFinish={finishLadder(screen.mode)}
+        onQuit={home}
       />
     );
   }
@@ -119,7 +197,7 @@ export default function LetterRip() {
       mode === "daily"
         ? `Letter Rip #${num} 🔤\n${score} points · ${found.length} words` +
           (found.some((w) => w.length === root.length) ? " · FULL RIP! 🎉" : "") +
-          (typeof window !== "undefined" ? `\n${window.location.origin}` : "")
+          origin
         : undefined;
     return (
       <Results
@@ -127,27 +205,71 @@ export default function LetterRip() {
         score={score}
         found={found}
         possible={findableWords(root, dict)}
-        heading={mode === "daily" ? `Daily Rip #${num}` : MODES[mode].title}
+        heading={mode === "daily" ? `Daily Rip #${num}` : RIP_MODES[mode].title}
         newBest={screen.newBest}
         shareText={shareText}
         onAgain={mode === "daily" ? () => start("quick") : () => start(mode)}
         againLabel={mode === "daily" ? "Play a Quick Rip" : "Play again"}
-        onHome={() => setScreen({ kind: "home" })}
+        onHome={home}
+      />
+    );
+  }
+
+  if (screen.kind === "ladderResults" && dict) {
+    const { mode, chain, ending } = screen;
+    const num = dailyNumber(today);
+    const rungs = chain.length - 1;
+    const shareText =
+      mode === "daily"
+        ? `Word Ladder #${num} 🪜\n${rungs} ${rungs === 1 ? "rung" : "rungs"} from ${chain[0].toUpperCase()}` + origin
+        : undefined;
+    return (
+      <LadderResults
+        chain={chain}
+        ending={ending}
+        dict={dict}
+        heading={mode === "daily" ? `Daily Ladder #${num}` : LADDER_MODES[mode].title}
+        newBest={screen.newBest}
+        shareText={shareText}
+        onAgain={mode === "daily" ? () => start("quick") : () => start(mode)}
+        againLabel={mode === "daily" ? "Play a Quick Ladder" : "Play again"}
+        onHome={home}
       />
     );
   }
 
   // Home
   const ready = !!dict;
+  const isLadder = game === "ladder";
+  const name = isLadder ? "Ladder" : "Rip";
   return (
-    <main className="flex flex-col w-full max-w-md mx-auto px-4 pt-10 pb-10 gap-7">
+    <main className="flex flex-col w-full max-w-md mx-auto px-4 pt-10 pb-10 gap-6">
       <header className="text-center">
         <div className="font-display font-bold text-muted tracking-[0.35em] uppercase text-sm">Letter</div>
         <h1 className="font-display font-extrabold text-[5.5rem] leading-[0.85] text-rip -rotate-3 drop-shadow-[0_6px_0_rgba(0,0,0,0.35)]">
           RIP!
         </h1>
-        <p className="mt-4 text-paper/80">How many words can you rip out of one big word?</p>
       </header>
+
+      {/* Game switch */}
+      <div className="grid grid-cols-2 p-1 rounded-2xl bg-ink-2 border border-ink-3" role="tablist">
+        {(["rip", "ladder"] as const).map((g) => (
+          <button
+            key={g}
+            role="tab"
+            aria-selected={game === g}
+            onClick={() => switchGame(g)}
+            className={`btn h-11 rounded-xl ${game === g ? "bg-paper text-ink" : "text-paper/70"}`}
+          >
+            {g === "rip" ? "Letter Rip" : "Word Ladder"}
+          </button>
+        ))}
+      </div>
+      <p className="-mt-2 text-center text-paper/80">
+        {isLadder
+          ? "Change one letter at a time. How high can you climb?"
+          : "How many words can you rip out of one big word?"}
+      </p>
 
       {dictError && (
         <div className="rounded-2xl bg-berry/20 border border-berry p-4 text-sm">
@@ -163,9 +285,9 @@ export default function LetterRip() {
         <div className="rounded-3xl bg-sun text-ink p-5 shadow-[0_6px_0_#b8901c]">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="font-display text-2xl font-extrabold">Daily Rip</div>
+              <div className="font-display text-2xl font-extrabold">Daily {name}</div>
               <div className="text-sm text-ink/70">
-                Same word for everyone today{today ? ` · #${dailyNumber(today)}` : ""}
+                Same {isLadder ? "start word" : "word"} for everyone today{today ? ` · #${dailyNumber(today)}` : ""}
               </div>
             </div>
             {streak > 0 && (
@@ -177,7 +299,7 @@ export default function LetterRip() {
           </div>
           {todayResult ? (
             <button onClick={showTodayResults} disabled={!ready} className="btn mt-4 w-full h-12 bg-ink text-sun">
-              Done today: {todayResult.score} pts · See results
+              Done today: {todayResult.score} {isLadder ? "rungs" : "pts"} · See results
             </button>
           ) : (
             <button onClick={() => start("daily")} disabled={!ready} className="btn mt-4 w-full h-12 bg-ink text-sun text-lg">
@@ -193,8 +315,10 @@ export default function LetterRip() {
             disabled={!ready}
             className="btn text-left rounded-3xl bg-rip text-ink p-4 shadow-[0_6px_0_#b23a17]"
           >
-            <div className="font-display text-xl font-extrabold">Quick Rip</div>
-            <div className="text-sm text-ink/75 font-sans font-medium">Random word · 2 min</div>
+            <div className="font-display text-xl font-extrabold">Quick {name}</div>
+            <div className="text-sm text-ink/75 font-sans font-medium">
+              {isLadder ? "Random word · 15s a go" : "Random word · 2 min"}
+            </div>
             {best.quick > 0 && <div className="text-xs mt-2 font-sans font-semibold">Best: {best.quick}</div>}
           </button>
           <button
@@ -202,8 +326,10 @@ export default function LetterRip() {
             disabled={!ready}
             className="btn text-left rounded-3xl bg-mint text-ink p-4 shadow-[0_6px_0_#1f9a66]"
           >
-            <div className="font-display text-xl font-extrabold">Kids&apos; Rip</div>
-            <div className="text-sm text-ink/75 font-sans font-medium">Easier word · 3 min</div>
+            <div className="font-display text-xl font-extrabold">Kids&apos; {name}</div>
+            <div className="text-sm text-ink/75 font-sans font-medium">
+              {isLadder ? "Easier word · 25s a go" : "Easier word · 3 min"}
+            </div>
             {best.kids > 0 && <div className="text-xs mt-2 font-sans font-semibold">Best: {best.kids}</div>}
           </button>
         </div>
@@ -217,25 +343,39 @@ export default function LetterRip() {
           className="w-full flex justify-between items-center p-4 font-display font-bold"
           aria-expanded={showRules}
         >
-          How to play <span className="text-muted">{showRules ? "−" : "+"}</span>
+          How to play {isLadder ? "Word Ladder" : "Letter Rip"} <span className="text-muted">{showRules ? "−" : "+"}</span>
         </button>
-        {showRules && (
-          <div className="px-4 pb-4 text-sm text-paper/85 space-y-2">
-            <p>
-              You get a big word. Make new words of three letters or more from its letters. Each letter can be
-              used once, and the big word itself doesn&apos;t count.
-            </p>
-            <p>
-              Longer words score more:{" "}
-              {[3, 4, 5, 6, 7, 8, 9].map((n) => `${n}→${wordPoints("x".repeat(n), "x".repeat(10))}`).join(", ")}.
-            </p>
-            <p>
-              Find a <b>different</b> word that uses every letter for a{" "}
-              <span className="text-sun font-bold">Full Rip</span>: +10 bonus.
-            </p>
-            <p className="text-muted">On a keyboard: type letters, Enter to submit, Space to shuffle.</p>
-          </div>
-        )}
+        {showRules &&
+          (isLadder ? (
+            <div className="px-4 pb-4 text-sm text-paper/85 space-y-2">
+              <p>
+                You get a four-letter word. Change <b>one</b> letter to make a new word, then change one letter of
+                that, and so on: LOVE → MOVE → MODE → MADE → FADE…
+              </p>
+              <p>No word can be used twice. You get 15 seconds for each move (25 in Kids&apos;).</p>
+              <p>
+                Your score is how many rungs you climb. Watch out for <b>dead ends</b>: words with nowhere left to
+                go. Keep your options open!
+              </p>
+              <p className="text-muted">On a keyboard: just type the new word and press Enter.</p>
+            </div>
+          ) : (
+            <div className="px-4 pb-4 text-sm text-paper/85 space-y-2">
+              <p>
+                You get a big word. Make new words of three letters or more from its letters. Each letter can be
+                used once, and the big word itself doesn&apos;t count.
+              </p>
+              <p>
+                Longer words score more:{" "}
+                {[3, 4, 5, 6, 7, 8, 9].map((n) => `${n}→${wordPoints("x".repeat(n), "x".repeat(10))}`).join(", ")}.
+              </p>
+              <p>
+                Find a <b>different</b> word that uses every letter for a{" "}
+                <span className="text-sun font-bold">Full Rip</span>: +10 bonus.
+              </p>
+              <p className="text-muted">On a keyboard: type letters, Enter to submit, Space to shuffle.</p>
+            </div>
+          ))}
       </section>
     </main>
   );

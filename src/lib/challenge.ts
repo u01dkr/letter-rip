@@ -1,5 +1,7 @@
 // Challenge mode rules. Settings are at the top so they're easy to tweak.
 import type { Level } from "./words";
+import type { Game } from "./stats";
+import { ladderSeconds } from "./ladder";
 
 export const ROOMS = "letterRip"; // Firestore collection (separate from Acro Party's "games")
 export const MAX_PLAYERS = 8;
@@ -9,8 +11,9 @@ export const PAUSE_MS = 3500; // breather before each new word
 // If their phone never confirms (lost signal), they still get the strike after this extra time.
 export const UNSEEN_GRACE_MS = 8000;
 
-/** Seconds per turn: the clock shrinks as the easy words get used up. */
-export function turnSeconds(level: Level, wordsUsed: number): number {
+/** Seconds per turn. In Letter Rip the clock shrinks as the easy words get used up. */
+export function turnSeconds(level: Level, wordsUsed: number, game: Game = "rip"): number {
+  if (game === "ladder") return ladderSeconds(level);
   const times = level === "easy" ? [30, 25, 20] : [20, 15, 10];
   if (wordsUsed < 6) return times[0];
   if (wordsUsed < 12) return times[1];
@@ -33,18 +36,21 @@ export type RoomEvent =
   | { id: number; kind: "word"; uid: string; word: string }
   | { id: number; kind: "fullrip"; uid: string; word: string; savedStrike: boolean }
   | { id: number; kind: "strike"; uid: string; strikes: number }
+  // Word Ladder: `by` played `word`, leaving `uid` with no moves
+  | { id: number; kind: "deadend"; uid: string; by: string; word: string; strikes: number; out: boolean }
   | { id: number; kind: "out"; uid: string };
 
 export type Room = {
   hostId: string;
   phase: "lobby" | "playing" | "over";
+  game?: Game; // "rip" (the default) or "ladder"
   level: Level;
   createdAt: number;
   players: Record<string, Player>;
   order: string[]; // turn order, fixed for the game
-  root: string;
+  root: string; // Letter Rip: the big word. Word Ladder: the current word.
   usedRoots: string[];
-  used: UsedWord[];
+  used: UsedWord[]; // Word Ladder includes the start word, with by: "start"
   turn: string; // uid of the player whose turn it is
   turnNo: number; // goes up every turn; stops two phones acting on the same turn
   pauseUntil: number; // server time the current turn really starts
